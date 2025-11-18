@@ -56,6 +56,7 @@ const MAX_FILE_SIZE = 5 * 1024 * 1024;
 /**
  * JWT Authentication Middleware
  * Verifies JWT token before allowing upload or file access
+ * Simplified: Only checks if token is valid, no role-based restrictions
  */
 function authenticateJWT(req, res, next) {
     const authHeader = req.headers.authorization;
@@ -71,7 +72,9 @@ function authenticateJWT(req, res, next) {
     try {
         const decoded = jwt.verify(token, JWT_SECRET);
         req.user = decoded; // Attach user info to request
-        req.astrologerId = decoded.id || decoded.astrologerId;
+        // Support multiple ID fields from different panels
+        req.astrologerId = decoded.id || decoded.astrologerId || decoded.userId || decoded.adminId;
+        req.isSuperAdmin = decoded.isSuperAdmin || decoded.isAdmin || false;
         next();
     } catch (error) {
         console.error('JWT verification failed:', error.message);
@@ -631,24 +634,38 @@ app.post('/upload-batch', authenticateJWT, uploadLimiter, upload.fields([
 });
 
 /**
- * Serve uploaded files with JWT authentication (Private URLs)
- * Files are NOT publicly accessible - JWT required
+ * Serve uploaded files with JWT authentication
+ * Access Rules:
+ * 1. Profile Photos: Any authenticated user can view
+ * 2. Sensitive Documents (Aadhar, PAN, Bank): Only owner or super admin
+ * 3. Super Admin: Can access all files
  */
 app.get('/cdn/file/astrologers/:astrologerId/:documentType/:filename', authenticateJWT, (req, res) => {
     try {
         const { astrologerId, documentType, filename } = req.params;
         
-        // Security: Verify the requesting user has permission to access this file
-        // Only allow access to own files OR admin users
-        if (req.astrologerId.toString() !== astrologerId.toString() && !req.user.isAdmin) {
+        // Decode document type (it may be URL encoded)
+        const decodedDocType = decodeURIComponent(documentType);
+        
+        // Rule 1: Super Admin can access everything
+        if (req.isSuperAdmin) {
+            console.log(`✅ Super Admin accessing file: ${decodedDocType} for astrologer ${astrologerId}`);
+        }
+        // Rule 2: Profile Photos are accessible to any authenticated user
+        else if (decodedDocType === 'Profile Photo' || decodedDocType === 'Profile_Photo') {
+            console.log(`✅ Authenticated user accessing Profile Photo for astrologer ${astrologerId}`);
+        }
+        // Rule 3: Sensitive documents - only owner can access
+        else if (req.astrologerId.toString() !== astrologerId.toString()) {
+            console.log(`❌ Access denied: User ${req.astrologerId} trying to access ${decodedDocType} of astrologer ${astrologerId}`);
             return res.status(403).json({
                 success: false,
-                message: 'Access denied. You can only access your own files.'
+                message: 'Access denied. You can only access your own sensitive documents.'
             });
         }
 
         // Construct file path
-        const filePath = path.join(CDN_BASE_PATH, 'astrologers', astrologerId, documentType, filename);
+        const filePath = path.join(CDN_BASE_PATH, 'astrologers', astrologerId, decodedDocType, filename);
         
         // Check if file exists
         if (!fs.existsSync(filePath)) {
@@ -660,8 +677,8 @@ app.get('/cdn/file/astrologers/:astrologerId/:documentType/:filename', authentic
 
         // Security headers
         res.setHeader('X-Content-Type-Options', 'nosniff');
-        res.setHeader('X-Frame-Options', 'DENY');
-        res.setHeader('Cache-Control', 'private, max-age=86400'); // Private cache (not public)
+        res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+        res.setHeader('Cache-Control', 'private, max-age=86400');
         res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; style-src 'none'; script-src 'none'");
         
         // Serve the file
