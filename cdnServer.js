@@ -12,6 +12,10 @@ require('dotenv').config();
 
 const app = express();
 
+// Trust proxy - Required when behind a reverse proxy (Nginx, Apache, etc.)
+// This allows express-rate-limit to correctly identify client IPs
+app.set('trust proxy', 1);
+
 // Security middleware
 app.use(helmet());
 app.use(cors({
