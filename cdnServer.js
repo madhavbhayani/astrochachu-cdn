@@ -294,6 +294,16 @@ async function sanitizeImage(inputPath, outputPath, documentType) {
                     .jpeg({ quality: 90, progressive: true });
                 break;
 
+            case 'Blog Image':
+                // Blog images: optimize for web display, good quality
+                pipeline = pipeline
+                    .resize(1920, 1080, { 
+                        fit: 'inside', 
+                        withoutEnlargement: true 
+                    })
+                    .jpeg({ quality: 85, progressive: true });
+                break;
+
             default:
                 // Default: moderate compression
                 pipeline = pipeline
@@ -391,7 +401,7 @@ app.post('/upload', authenticateJWT, uploadLimiter, upload.single('file'), async
         }
 
         // Validate document type
-        const validDocumentTypes = ['Aadhar Card', 'Bank Passbook', 'Profile Photo', 'PAN Card'];
+        const validDocumentTypes = ['Aadhar Card', 'Bank Passbook', 'Profile Photo', 'PAN Card', 'Blog Image'];
         if (!validDocumentTypes.includes(documentType)) {
             fs.unlinkSync(req.file.path);
             return res.status(400).json({
@@ -425,9 +435,20 @@ app.post('/upload', authenticateJWT, uploadLimiter, upload.single('file'), async
             console.warn('⚠️ File warnings:', scanResult.warnings);
         }
 
-        // Create astrologer directory structure
-        const astrologerDir = path.join(CDN_BASE_PATH, 'astrologers', astrologerId.toString());
-        const documentDir = path.join(astrologerDir, documentType);
+        // Create directory structure based on document type
+        let documentDir;
+        let cdnUrlPath;
+        
+        if (documentType === 'Blog Image') {
+            // Blog images go to a separate blogs directory
+            documentDir = path.join(CDN_BASE_PATH, 'blogs');
+            cdnUrlPath = 'blogs';
+        } else {
+            // Astrologer documents go to astrologers directory
+            const astrologerDir = path.join(CDN_BASE_PATH, 'astrologers', astrologerId.toString());
+            documentDir = path.join(astrologerDir, documentType);
+            cdnUrlPath = `astrologers/${astrologerId}/${encodeURIComponent(documentType)}`;
+        }
         
         if (!fs.existsSync(documentDir)) {
             fs.mkdirSync(documentDir, { recursive: true, mode: 0o755 });
@@ -456,7 +477,7 @@ app.post('/upload', authenticateJWT, uploadLimiter, upload.single('file'), async
         fs.unlinkSync(tempFilePath);
 
         // Generate CDN URL (requires JWT for access)
-        const cdnUrl = `${CDN_DOMAIN}/cdn/file/astrologers/${astrologerId}/${encodeURIComponent(documentType)}/${secureFilename}`;
+        const cdnUrl = `${CDN_DOMAIN}/cdn/file/${cdnUrlPath}/${secureFilename}`;
 
         // Get file stats
         const fileStats = fs.statSync(finalPath);
@@ -693,6 +714,43 @@ app.get('/cdn/file/astrologers/:astrologerId/:documentType/:filename', authentic
     }
 });
 
+/**
+ * Serve blog images (PUBLIC - No JWT required)
+ * Blog images are publicly accessible
+ */
+app.get('/cdn/file/blogs/:filename', (req, res) => {
+    try {
+        const { filename } = req.params;
+        
+        // Construct file path
+        const filePath = path.join(CDN_BASE_PATH, 'blogs', filename);
+        
+        // Check if file exists
+        if (!fs.existsSync(filePath)) {
+            return res.status(404).json({
+                success: false,
+                message: 'File not found'
+            });
+        }
+
+        // Security headers
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+        res.setHeader('Cache-Control', 'public, max-age=604800'); // 7 days cache for blog images
+        res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; style-src 'none'; script-src 'none'");
+        
+        // Serve the file
+        res.sendFile(filePath);
+        
+    } catch (error) {
+        console.error('Error serving blog image:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error serving file'
+        });
+    }
+});
+
 // Health check
 app.get('/health', (req, res) => {
     res.json({
@@ -702,7 +760,8 @@ app.get('/health', (req, res) => {
         endpoints: {
             upload: 'POST /upload',
             batchUpload: 'POST /upload-batch',
-            serve: 'GET /astrologers/{astrologerId}/{documentType}/{filename}'
+            serveAstrologer: 'GET /cdn/file/astrologers/{astrologerId}/{documentType}/{filename}',
+            serveBlog: 'GET /cdn/file/blogs/{filename}'
         }
     });
 });
